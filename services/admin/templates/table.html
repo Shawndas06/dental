@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  {% include "nav.html" %}
+  <main class="content">
+    <h1 class="page-title">{{ title }}</h1>
+    <div class="card" style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            {% for label in labels %}<th>{{ label }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+          <tr>
+            {% for col in columns %}
+            <td>{{ item[col] }}</td>
+            {% endfor %}
+          </tr>
+          {% else %}
+          <tr><td colspan="{{ labels|length }}" class="muted">Нет данных</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+{% endblock %}

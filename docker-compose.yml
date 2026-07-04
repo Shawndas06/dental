@@ -1,0 +1,215 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dental_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-dental}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dental}
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dental} -d ${POSTGRES_DB:-dental_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4224}:4222"
+      - "${NATS_MONITOR_PORT:-8224}:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  crm-mock:
+    build:
+      context: .
+      network: host
+    command: ["uvicorn", "services.crm_mock.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    env_file: &app_env
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      CRM_MOCK_FAILURE_RATE: ${CRM_MOCK_FAILURE_RATE:-0}
+    ports:
+      - "${CRM_MOCK_PORT:-8102}:8002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  core-api:
+    build:
+      context: .
+      network: host
+    command: ["uvicorn", "services.core_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: *app_env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://dental:dental@postgres:5432/dental_bot}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+      CRM_MOCK_URL: ${CRM_MOCK_URL:-http://crm-mock:8002}
+    ports:
+      - "${CORE_API_PORT:-8100}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      crm-mock:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ai-orchestrator:
+    build:
+      context: .
+      network: host
+    command: ["uvicorn", "services.ai_orchestrator.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    env_file: *app_env
+    environment:
+      CORE_API_URL: ${CORE_API_URL:-http://core-api:8000}
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+      AI_MODE: ${AI_MODE:-rules}
+    ports:
+      - "${AI_ORCHESTRATOR_PORT:-8101}:8001"
+    depends_on:
+      core-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bot-gateway:
+    build:
+      context: .
+      network: host
+    network_mode: host
+    command: ["uvicorn", "services.bot_gateway.main:app", "--host", "0.0.0.0", "--port", "8180"]
+    env_file: *app_env
+    environment:
+      CORE_API_URL: http://127.0.0.1:8100
+      AI_ORCHESTRATOR_URL: http://127.0.0.1:8101
+      REDIS_URL: redis://127.0.0.1:6380
+      TELEGRAM_MODE: ${TELEGRAM_MODE:-polling}
+      TELEGRAM_PROXY_URL: http://127.0.0.1:20170
+    depends_on:
+      core-api:
+        condition: service_healthy
+      ai-orchestrator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8180/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: .
+      network: host
+    network_mode: host
+    command: ["python", "-m", "services.worker.main"]
+    env_file: *app_env
+    environment:
+      CORE_API_URL: http://127.0.0.1:8100
+      NATS_URL: nats://127.0.0.1:4224
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
+      TELEGRAM_PROXY_URL: http://127.0.0.1:20170
+    depends_on:
+      core-api:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  admin:
+    build:
+      context: .
+      network: host
+    network_mode: host
+    command: ["uvicorn", "services.admin.main:app", "--host", "0.0.0.0", "--port", "8190"]
+    env_file: *app_env
+    environment:
+      CORE_API_URL: http://127.0.0.1:8100
+      BOT_GATEWAY_URL: http://127.0.0.1:8180
+      AI_ORCHESTRATOR_URL: http://127.0.0.1:8101
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-change-me-admin-token}
+    depends_on:
+      core-api:
+        condition: service_healthy
+      bot-gateway:
+        condition: service_healthy
+      ai-orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8190/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:

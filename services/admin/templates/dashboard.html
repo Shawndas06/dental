@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  {% include "nav.html" %}
+  <main class="content">
+    <h1 class="page-title">{{ title }}</h1>
+    {% if apiError %}
+    <div class="card"><p style="color:var(--danger)">Не удалось загрузить данные. Проверьте ADMIN_TOKEN и core-api.</p></div>
+    {% else %}
+    <div class="grid">
+      <div class="stat"><div class="stat-label">Пациенты</div><div class="stat-value">{{ stats.patients or 0 }}</div></div>
+      <div class="stat"><div class="stat-label">Записи (активные)</div><div class="stat-value">{{ stats.appointmentsActive or 0 }}</div></div>
+      <div class="stat"><div class="stat-label">Всего записей</div><div class="stat-value">{{ stats.appointments or 0 }}</div></div>
+      <div class="stat"><div class="stat-label">Свободных слотов</div><div class="stat-value">{{ stats.slotsAvailable or 0 }}</div></div>
+      <div class="stat"><div class="stat-label">Врачи</div><div class="stat-value">{{ stats.doctors or 0 }}</div></div>
+      <div class="stat"><div class="stat-label">Услуги</div><div class="stat-value">{{ stats.services or 0 }}</div></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Быстрые действия</h2>
+      <div class="actions">
+        <a class="btn" href="/demo">Запустить демо-сценарий</a>
+        <a class="btn btn-secondary" href="/appointments">Записи</a>
+        <a class="btn btn-secondary" href="/patients">Пациенты</a>
+      </div>
+    </div>
+    {% endif %}
+  </main>
+</div>
+{% endblock %}

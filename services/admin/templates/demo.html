@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  {% include "nav.html" %}
+  <main class="content">
+    <h1 class="page-title">{{ title }}</h1>
+
+    {% if request.query_params.get('reset') %}
+    <div class="card"><p class="badge-ok">Демо-данные сброшены</p></div>
+    {% endif %}
+
+    <div class="card">
+      <h2 style="margin-top:0">Автоматический сценарий</h2>
+      <p class="muted">Проверяет полный цикл: регистрация, AI intake, запись, отказы, список записей.</p>
+      <ol>
+        <li>Сброс транзакционных данных</li>
+        <li>Быстрая регистрация демо-клиента</li>
+        <li>Текст «Болит зуб слева уже неделю» — AI подбирает слоты</li>
+        <li>Команда /start в боте</li>
+        <li>Запись через кнопку слота</li>
+        <li>Отказ от диагноза</li>
+        <li>Отказ на неизвестную услугу (имплантация)</li>
+        <li>Экран «Мои записи»</li>
+      </ol>
+      <div class="actions">
+        <form method="post" action="/demo/run" style="display:inline">
+          <button type="submit" class="btn">Запустить демо</button>
+        </form>
+        <form method="post" action="/demo/reset" style="display:inline">
+          <button type="submit" class="btn btn-danger">Только сброс</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Ручной сценарий в Telegram</h2>
+      <p>После запуска демо откройте бота и проверьте пользователя <code>999000001</code> или пройдите шаги:</p>
+      <ol>
+        <li><code>/start</code> → Продолжить</li>
+        <li>Напишите: <code>Болит зуб слева уже неделю</code></li>
+        <li>Нажмите слот → запись создана</li>
+        <li>Мои записи → перенос / отмена</li>
+      </ol>
+    </div>
+
+    {% if result %}
+    <div class="card">
+      <h2 style="margin-top:0">
+        Результат:
+        {% if result.success %}<span class="badge-ok">Успех</span>{% else %}<span class="badge-fail">Есть ошибки</span>{% endif %}
+      </h2>
+      <table>
+        <thead><tr><th>Шаг</th><th>Статус</th><th>Детали</th></tr></thead>
+        <tbody>
+          {% for step in result.steps %}
+          <tr>
+            <td>{{ step.name }}</td>
+            <td>{% if step.ok %}<span class="badge-ok">OK</span>{% else %}<span class="badge-fail">FAIL</span>{% endif %}</td>
+            <td>{{ step.detail }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <pre>{{ result_json }}</pre>
+    </div>
+    {% endif %}
+  </main>
+</div>
+{% endblock %}

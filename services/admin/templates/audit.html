@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  {% include "nav.html" %}
+  <main class="content">
+    <h1 class="page-title">{{ title }}</h1>
+    <div class="card" style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Время</th><th>Тип</th><th>Actor</th><th>Payload</th></tr></thead>
+        <tbody>
+          {% for e in items %}
+          <tr>
+            <td>{{ e.createdAt }}</td>
+            <td>{{ e.eventType }}</td>
+            <td>{{ e.actorId or '—' }}</td>
+            <td><code style="font-size:0.8rem">{{ e.payload }}</code></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="muted">Событий пока нет</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+{% endblock %}

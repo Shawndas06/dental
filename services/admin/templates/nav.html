@@ -1,0 +1,13 @@
+<aside class="sidebar">
+  <h1>Dental Admin</h1>
+  <nav>
+    <a href="/dashboard" {% if title == 'Дашборд' %}class="active"{% endif %}>Дашборд</a>
+    <a href="/patients" {% if title == 'Пациенты' %}class="active"{% endif %}>Пациенты</a>
+    <a href="/appointments" {% if title == 'Записи' %}class="active"{% endif %}>Записи</a>
+    <a href="/doctors" {% if title == 'Врачи и услуги' %}class="active"{% endif %}>Врачи и услуги</a>
+    <a href="/slots" {% if title == 'Слоты' %}class="active"{% endif %}>Слоты</a>
+    <a href="/audit" {% if title == 'Аудит' %}class="active"{% endif %}>Аудит</a>
+    <a href="/demo" {% if title == 'Демо-сценарий' %}class="active"{% endif %}>Демо-сценарий</a>
+  </nav>
+  <a class="logout" href="/logout">Выйти</a>
+</aside>

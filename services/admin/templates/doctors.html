@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  {% include "nav.html" %}
+  <main class="content">
+    <h1 class="page-title">{{ title }}</h1>
+    <div class="card">
+      <h2 style="margin-top:0">Врачи</h2>
+      <table>
+        <thead><tr><th>Имя</th><th>Специальность</th><th>ID</th><th>Первичный</th></tr></thead>
+        <tbody>
+          {% for d in doctors %}
+          <tr>
+            <td>{{ d.name }}</td>
+            <td>{{ d.specialty }}</td>
+            <td><code>{{ d.doctorId }}</code></td>
+            <td>{{ 'Да' if d.acceptsPrimary else 'Нет' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Услуги</h2>
+      <table>
+        <thead><tr><th>Название</th><th>Категория</th><th>Цена</th><th>Врач</th></tr></thead>
+        <tbody>
+          {% for s in services %}
+          <tr>
+            <td>{{ s.name }}</td>
+            <td>{{ s.category }}</td>
+            <td>{{ s.price }} {{ s.currency }}</td>
+            <td><code>{{ s.doctorId }}</code></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+{% endblock %}
