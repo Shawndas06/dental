@@ -36,13 +36,24 @@ curl -x http://127.0.0.1:20170 "https://api.telegram.org/bot<TOKEN>/getMe"
 ## 2. Запуск
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
+
+Документация для ментора (MkDocs):
+
+```bash
+docker compose up -d docs
+# или: mkdocs serve -a 0.0.0.0:8008
+```
+
+См. также [Руководство для ментора](mentor-guide.md).
 
 Сервисы поднимаются с портами, смещёнными относительно стандартных (чтобы не конфликтовать с другими проектами):
 
 | Сервис | URL на хосте |
 |--------|--------------|
+| **документация (MkDocs)** | `http://127.0.0.1:8008` |
+| **админ-панель** | `http://127.0.0.1:8190` |
 | bot-gateway | `http://127.0.0.1:8180` |
 | core-api | `http://127.0.0.1:8100` |
 | ai-orchestrator | `http://127.0.0.1:8101` |
@@ -100,9 +111,12 @@ Debug-эндпоинт симулирует update:
 
 ```bash
 curl -X POST http://127.0.0.1:8180/debug/simulate \
+  -H "X-Debug-Token: $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"message":{"chat":{"id":1001},"from":{"id":1001,"first_name":"Demo","username":"demo"},"text":"/start"}}'
 ```
+
+Требуется `DEBUG_API_ENABLED=true` в `.env`.
 
 ## 6. Тесты
 

@@ -1,4 +1,3 @@
-import hmac
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -18,6 +17,7 @@ from services.core_api.models import (
     User,
 )
 from shared.config import get_settings
+from shared.security import safe_compare_digest
 
 settings = get_settings()
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -32,7 +32,7 @@ def verify_admin_token(x_admin_token: str | None = Header(default=None)) -> None
             detail="ADMIN_TOKEN is not configured",
         )
     provided = x_admin_token or ""
-    if not hmac.compare_digest(provided, settings.admin_token):
+    if not safe_compare_digest(provided, settings.admin_token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
 
 
@@ -177,7 +177,11 @@ async def admin_demo_run(_: AdminAuth, db: Db) -> dict:
     ai_url = settings.ai_orchestrator_url or "http://127.0.0.1:8101"
     core_url = settings.core_api_url or "http://127.0.0.1:8100"
     if "core-api:" in core_url:
-        core_url = "http://127.0.0.1:8100"
+        core_url = "http://127.0.0.1:8000"
+    if "bot-gateway:" in bot_url:
+        bot_url = "http://host.docker.internal:8180"
+    if "ai-orchestrator:" in ai_url:
+        ai_url = "http://ai-orchestrator:8001"
     result = await run_demo_scenario(core_url, bot_url, ai_url, skip_reset=True)
     result["reset"] = reset_info
     return result

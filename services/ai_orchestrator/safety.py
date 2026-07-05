@@ -11,10 +11,22 @@ FORBIDDEN_MEDICAL_PATTERNS = [
     r"\bэто точно\b",
 ]
 
+CLINICAL_QUESTION_PATTERNS = [
+    r"\bдиагноз\b",
+    r"\bболезн",
+    r"\bлечи(те|ть|ться)?\b",
+    r"\bтаблетк",
+    r"\bантибиотик",
+    r"\bчто у меня\b",
+    r"\bнужно ли удал",
+    r"\bфлюс\b",
+    r"\bчем леч",
+]
+
 
 def is_clinical_question(text: str) -> bool:
     lowered = text.lower()
-    return any(
+    if any(
         phrase in lowered
         for phrase in (
             "что у меня за болезнь",
@@ -23,7 +35,9 @@ def is_clinical_question(text: str) -> bool:
             "какие таблетки",
             "нужно ли удалять",
         )
-    )
+    ):
+        return True
+    return any(re.search(pattern, lowered) for pattern in CLINICAL_QUESTION_PATTERNS)
 
 
 def validate_ai_screen(response: IntakeResponse, allowed_service_ids: set[str], allowed_slot_ids: set[str]) -> None:

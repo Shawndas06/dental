@@ -15,7 +15,16 @@ SERVICES = [
         "price": 1500,
         "currency": "RUB",
         "duration_minutes": 60,
-    }
+    },
+    {
+        "service_id": "svc_hygiene",
+        "doctor_id": "doc_therapist",
+        "name": "Профессиональная гигиена",
+        "category": "hygiene",
+        "price": 4200,
+        "currency": "RUB",
+        "duration_minutes": 60,
+    },
 ]
 
 SLOTS = [
@@ -80,6 +89,46 @@ async def test_button_pricing_flow_does_not_call_ai(monkeypatch) -> None:
     assert bot_main.AI_CALL_COUNT == 0
 
 
+@pytest.mark.asyncio
+async def test_service_select_saves_service_id_in_state(monkeypatch) -> None:
+    from shared.conversation_state import clear_state_cache, get_state
+
+    clear_state_cache()
+    monkeypatch.setattr("httpx.AsyncClient", lambda *args, **kwargs: FakeAsyncClient())
+
+    await bot_main.handle_update(
+        {
+            "callback_query": {
+                "from": {"id": 1001, "username": "demo"},
+                "message": {"chat": {"id": 1001}},
+                "data": "service:select:svc_hygiene",
+            }
+        },
+        send=False,
+    )
+
+    assert get_state("1001")["serviceId"] == "svc_hygiene"
+
+
+@pytest.mark.asyncio
+async def test_invalid_callback_returns_menu(monkeypatch) -> None:
+    monkeypatch.setattr("httpx.AsyncClient", lambda *args, **kwargs: FakeAsyncClient())
+
+    response = await bot_main.handle_update(
+        {
+            "callback_query": {
+                "from": {"id": 1001, "username": "demo"},
+                "message": {"chat": {"id": 1001}},
+                "data": "bad callback",
+            }
+        },
+        send=False,
+    )
+
+    assert response is not None
+    assert "Неверная команда" in response.text
+
+
 class FakeResponse:
     def __init__(self, payload: dict | list, status_code: int = 200) -> None:
         self._payload = payload
@@ -101,6 +150,8 @@ class FakeAsyncClient:
         return None
 
     async def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+        if url.endswith("/api/ai/intake"):
+            return FakeResponse({"intent": "appointment_intake", "buttons": [], "route": {}})
         if url.endswith("/api/patients/lookup"):
             return FakeResponse({"patient_id": "pat_demo", "is_primary": True})
         if url.endswith("/api/users/telegram/register"):

@@ -28,6 +28,8 @@ flowchart TB
 | **ai-orchestrator** | 8101 | CKS-классификация, intake, валидация AI-ответа |
 | **crm-mock** | 8102 | Mock CRM/SRM для lookup и sync |
 | **worker** | — | NATS consumers, напоминания, уведомления в Telegram |
+| **admin** | 8190 | Web UI: дашборд, демо, аудит |
+| **docs** | 8008 | MkDocs документация |
 
 ## Инфраструктура
 
@@ -72,6 +74,9 @@ sequenceDiagram
 | `schemas.py` | Pydantic-модели API и UI |
 | `callbacks.py` | Парсинг и валидация `callback_data` |
 | `security.py` | Webhook secret, rate limit, RBAC |
+| `service_auth.py` | `X-Service-Token` middleware |
+| `patient_proof.py` | HMAC `X-Patient-Proof` |
+| `conversation_state.py` | Redis-backed bot state |
 | `events.py` | NATS subjects и EventEnvelope |
 | `nats.py` | EventPublisher |
 | `telegram_client.py` | Bot + httpx с прокси |

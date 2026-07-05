@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY pyproject.toml requirements.txt /app/
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt \
+    && pip install "mkdocs>=1.6.0" "mkdocs-material>=9.5.0"
+
+COPY mkdocs.yml /app/
+COPY docs /app/docs
+
+EXPOSE 8008
+
+CMD ["mkdocs", "serve", "-a", "0.0.0.0:8008", "-f", "/app/mkdocs.yml"]

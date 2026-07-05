@@ -11,7 +11,10 @@ class Base(DeclarativeBase):
 
 
 def _engine_url() -> str:
-    return get_settings().database_url
+    url = get_settings().database_url
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url.removeprefix("postgres://")
+    return url
 
 
 engine = create_engine(_engine_url(), pool_pre_ping=True)

@@ -5,8 +5,11 @@
 Рекомендуемый режим: **polling** + прокси для Telegram API.
 
 ```bash
-docker compose up --build
+docker compose up -d --build
+docker compose up -d docs
 ```
+
+Документация: **http://127.0.0.1:8008**
 
 ## Production checklist
 
@@ -54,9 +57,13 @@ TELEGRAM_WEBHOOK_URL=https://xxxx.ngrok-free.app/api/telegram/webhook
 
 | Сервис | Хост |
 |--------|------|
+| docs (MkDocs) | 8008 |
+| admin | 8190 |
 | bot-gateway | 8180 |
 | core-api | 8100 |
 | postgres | 55432 |
+
+Инфраструктура и API привязаны к `127.0.0.1` (не доступны из LAN без SSH-туннеля).
 
 При деплое на VPS можно вернуть стандартные порты через `.env`.
 
@@ -84,6 +91,15 @@ curl http://127.0.0.1:8101/health
 ```
 
 ## Публикация документации
+
+Локально в Docker:
+
+```bash
+docker compose up -d docs
+# http://127.0.0.1:8008
+```
+
+Статическая сборка:
 
 ```bash
 pip install -e ".[docs]"

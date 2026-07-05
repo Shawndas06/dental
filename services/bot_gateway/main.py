@@ -1,10 +1,10 @@
 import asyncio
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from services.bot_gateway.rendering import (
     appointments_screen,
@@ -21,8 +21,18 @@ from services.bot_gateway.rendering import (
 from shared.callbacks import parse_callback
 from shared.config import get_settings
 from shared.schemas import Button, IntakeResponse, Screen
-from shared.security import SlidingWindowRateLimiter, rate_limit_request, verify_webhook_secret
-from shared.telegram_client import create_telegram_bot, httpx_async_client
+from shared.security import (
+    SlidingWindowRateLimiter,
+    rate_limit_request,
+    verify_debug_access,
+    verify_webhook_secret,
+)
+from shared.conversation_state import get_state, merge_state, save_state
+from shared.notification_delivery import send_target_notification
+from shared.service_auth import internal_service_headers
+from shared.service_visits import visit_type_for_service
+from shared.startup_checks import warn_insecure_defaults
+from shared.telegram_client import create_telegram_bot, get_telegram_api, httpx_async_client, post_telegram_api
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -36,10 +46,10 @@ except ModuleNotFoundError:
     Bot = None
 
 bot = create_telegram_bot()
-STATE: dict[str, dict[str, Any]] = {}
 AI_CALL_COUNT = 0
 POLLING_TASK: asyncio.Task | None = None
 POLLING_STOP = asyncio.Event()
+user_limiter = SlidingWindowRateLimiter(limit=40, window_seconds=60)
 
 
 async def poll_telegram_updates() -> None:
@@ -53,39 +63,40 @@ async def poll_telegram_updates() -> None:
         "Telegram long polling started%s",
         f" via proxy {settings.telegram_proxy_url}" if settings.telegram_proxy_url else "",
     )
-    async with httpx_async_client(timeout=60) as client:
-        await client.post(
-            f"{base}/bot{token}/deleteWebhook",
-            json={"drop_pending_updates": True},
-        )
-        while not POLLING_STOP.is_set():
-            try:
-                response = await client.get(
-                    updates_url,
-                    params={"offset": offset, "timeout": 30},
-                )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    logger.warning("getUpdates returned error: %s", payload)
-                    await asyncio.sleep(3)
-                    continue
-                for update in payload.get("result", []):
-                    offset = update["update_id"] + 1
-                    try:
-                        await handle_update(update, send=True)
-                    except Exception:
-                        logger.exception("Failed to handle Telegram update %s", update.get("update_id"))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("Telegram polling error: %s", exc)
-                await asyncio.sleep(5)
+    await post_telegram_api(
+        f"{base}/bot{token}/deleteWebhook",
+        json={"drop_pending_updates": True},
+        timeout=10,
+    )
+    while not POLLING_STOP.is_set():
+        try:
+            response = await get_telegram_api(
+                updates_url,
+                params={"offset": offset, "timeout": 30},
+                timeout=65,
+            )
+            payload = response.json()
+            if not payload.get("ok"):
+                logger.warning("getUpdates returned error: %s", payload)
+                await asyncio.sleep(3)
+                continue
+            for update in payload.get("result", []):
+                offset = update["update_id"] + 1
+                try:
+                    await handle_update(update, send=True)
+                except Exception:
+                    logger.exception("Failed to handle Telegram update %s", update.get("update_id"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Telegram polling error: %s", exc)
+            await asyncio.sleep(5)
 
 
 @app.on_event("startup")
 async def startup() -> None:
     global POLLING_TASK
+    warn_insecure_defaults()
     mode = settings.telegram_mode.lower().strip()
     if mode == "polling":
         if not settings.telegram_bot_token:
@@ -134,7 +145,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/debug/ai-call-count")
-def ai_call_count() -> dict[str, int]:
+def ai_call_count(_: Annotated[None, Depends(verify_debug_access)]) -> dict[str, int]:
     return {"count": AI_CALL_COUNT}
 
 
@@ -151,7 +162,10 @@ async def telegram_webhook(
 
 
 @app.post("/debug/simulate", response_model=Screen)
-async def simulate_update(update: dict) -> Screen:
+async def simulate_update(
+    update: dict,
+    _: Annotated[None, Depends(verify_debug_access)],
+) -> Screen:
     screen = await handle_update(update, send=False)
     if not screen:
         raise HTTPException(status_code=400, detail="Unsupported update")
@@ -159,6 +173,17 @@ async def simulate_update(update: dict) -> Screen:
 
 
 async def handle_update(update: dict, send: bool = True) -> Screen | None:
+    telegram_user_id = _telegram_user_id(update)
+    if telegram_user_id and not user_limiter.allow(telegram_user_id):
+        chat_id = _chat_id(update)
+        if chat_id:
+            return await _respond(
+                chat_id,
+                simple_screen("Слишком много запросов. Подождите минуту."),
+                send,
+            )
+        return None
+
     if "message" in update:
         message = update["message"]
         chat_id = str(message["chat"]["id"])
@@ -166,6 +191,7 @@ async def handle_update(update: dict, send: bool = True) -> Screen | None:
         telegram_user_id = str(from_user.get("id", chat_id))
         text = (message.get("text") or "").strip()
         await _register_user(telegram_user_id, chat_id, from_user.get("username"))
+        await send_target_notification(chat_id, from_user.get("username"))
         if message.get("contact"):
             return await _quick_register(
                 telegram_user_id,
@@ -189,6 +215,7 @@ async def handle_update(update: dict, send: bool = True) -> Screen | None:
         chat_id = str(message.get("chat", {}).get("id"))
         from_user = callback.get("from", {})
         telegram_user_id = str(from_user.get("id", chat_id))
+        await send_target_notification(chat_id, from_user.get("username"))
         if send and bot:
             try:
                 await bot.answer_callback_query(callback_query_id=callback.get("id"))
@@ -205,12 +232,13 @@ async def _handle_text(telegram_user_id: str, chat_id: str, text: str, send: boo
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.post(
             f"{settings.ai_orchestrator_url}/api/ai/intake",
+            headers=internal_service_headers(),
             json={"telegram_user_id": telegram_user_id, "text": text},
         )
         response.raise_for_status()
     screen = IntakeResponse.model_validate(response.json())
     if screen.conversation_state:
-        STATE[telegram_user_id] = screen.conversation_state
+        save_state(telegram_user_id, screen.conversation_state)
     return await _respond(chat_id, screen, send)
 
 
@@ -230,7 +258,17 @@ async def _handle_callback(
     send: bool,
     from_user: dict | None = None,
 ) -> Screen:
-    action = parse_callback(data)
+    try:
+        action = parse_callback(data)
+    except ValueError:
+        return await _respond(
+            chat_id,
+            simple_screen(
+                "Неверная команда. Выберите пункт меню.",
+                [Button(text="Главное меню", callback_data="menu:main")],
+            ),
+            send,
+        )
     if data == "menu:main":
         return await _respond(chat_id, main_menu(), send)
     if data == "menu:contacts":
@@ -252,53 +290,63 @@ async def _handle_callback(
     if data == "calendar:doctor:today":
         return await _show_doctor_calendar(chat_id, send)
     if action.namespace == "service" and action.action == "select":
-        return await _show_slots(chat_id, action.args[0], send)
+        return await _show_slots(telegram_user_id, chat_id, action.args[0], send)
     if action.namespace == "slot" and action.action == "select":
         return await _commit_slot(telegram_user_id, chat_id, action.args[0], send)
     if action.namespace == "appointment" and action.action == "cancel":
-        return await _cancel_appointment(chat_id, action.args[0], send)
+        return await _cancel_appointment(telegram_user_id, chat_id, action.args[0], send)
     if action.namespace == "reschedule" and action.action == "start":
         return await _show_reschedule_slots(chat_id, action.args[0], send)
     if action.namespace == "reschedule" and action.action == "slot":
-        return await _commit_patient_reschedule(chat_id, action.args[0], action.args[1], send)
+        return await _commit_patient_reschedule(telegram_user_id, chat_id, action.args[0], action.args[1], send)
     if action.namespace == "reschedule" and action.action == "approve":
-        return await _approve_reschedule(chat_id, action.args[0], send)
+        return await _approve_reschedule(telegram_user_id, chat_id, action.args[0], send)
     if action.namespace == "reschedule" and action.action == "reject":
-        return await _reject_reschedule(chat_id, action.args[0], send)
+        return await _reject_reschedule(telegram_user_id, chat_id, action.args[0], send)
     return await _respond(chat_id, main_menu(), send)
 
 
 async def _show_services(chat_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=5) as client:
-        response = await client.get(f"{settings.core_api_url}/api/services")
+        response = await client.get(
+            f"{settings.core_api_url}/api/services",
+            headers=internal_service_headers(),
+        )
         response.raise_for_status()
     return await _respond(chat_id, services_screen(response.json()), send)
 
 
-async def _show_slots(chat_id: str, service_id: str, send: bool) -> Screen:
+async def _show_slots(telegram_user_id: str, chat_id: str, service_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=5) as client:
         response = await client.get(
             f"{settings.core_api_url}/api/schedule/slots/available",
+            headers=internal_service_headers(),
             params={"service_id": service_id, "limit": 6},
         )
         response.raise_for_status()
-    return await _respond(chat_id, slots_screen(response.json(), service_id), send)
+    screen = slots_screen(response.json(), service_id)
+    merge_state(telegram_user_id, screen.conversation_state or {})
+    return await _respond(chat_id, screen, send)
 
 
 async def _commit_slot(telegram_user_id: str, chat_id: str, slot_id: str, send: bool) -> Screen:
-    state = STATE.get(telegram_user_id, {})
+    state = get_state(telegram_user_id)
     doctor_id = state.get("doctorId") or _doctor_from_slot_id(slot_id)
     service_id = state.get("serviceId") or ("svc_extraction" if doctor_id == "doc_surgeon" else "svc_primary")
-    visit_type = state.get("visitType") or "primary_consultation"
+    visit_type = state.get("visitType") or visit_type_for_service(service_id)
     async with httpx.AsyncClient(timeout=8) as client:
         patient = await client.post(
             f"{settings.core_api_url}/api/patients/lookup",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
             json={"telegram_user_id": telegram_user_id},
         )
         patient.raise_for_status()
         response = await client.post(
             f"{settings.core_api_url}/api/appointments",
-            headers={"Idempotency-Key": f"appointment-create:{telegram_user_id}:{slot_id}"},
+            headers={
+                "Idempotency-Key": f"appointment-create:{telegram_user_id}:{slot_id}",
+                **internal_service_headers(telegram_user_id=telegram_user_id),
+            },
             json={
                 "patient_id": patient.json()["patient_id"],
                 "doctor_id": doctor_id,
@@ -332,11 +380,13 @@ async def _show_patient_appointments(telegram_user_id: str, chat_id: str, send: 
     async with httpx.AsyncClient(timeout=5) as client:
         patient = await client.post(
             f"{settings.core_api_url}/api/patients/lookup",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
             json={"telegram_user_id": telegram_user_id},
         )
         patient.raise_for_status()
         response = await client.get(
-            f"{settings.core_api_url}/api/appointments/patient/{patient.json()['patient_id']}"
+            f"{settings.core_api_url}/api/appointments/patient/{patient.json()['patient_id']}",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
         )
         response.raise_for_status()
     appointments = response.json()
@@ -367,7 +417,11 @@ async def _show_patient_appointments(telegram_user_id: str, chat_id: str, send: 
 
 async def _show_reschedule_slots(chat_id: str, appointment_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=5) as client:
-        response = await client.get(f"{settings.core_api_url}/api/schedule/slots/available", params={"limit": 6})
+        response = await client.get(
+            f"{settings.core_api_url}/api/schedule/slots/available",
+            headers=internal_service_headers(),
+            params={"limit": 6},
+        )
         response.raise_for_status()
     buttons = [
         Button(
@@ -387,11 +441,20 @@ async def _show_reschedule_slots(chat_id: str, appointment_id: str, send: bool) 
     return await _respond(chat_id, screen, send)
 
 
-async def _commit_patient_reschedule(chat_id: str, appointment_id: str, slot_id: str, send: bool) -> Screen:
+async def _commit_patient_reschedule(
+    telegram_user_id: str,
+    chat_id: str,
+    appointment_id: str,
+    slot_id: str,
+    send: bool,
+) -> Screen:
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.post(
             f"{settings.core_api_url}/api/appointments/{appointment_id}/reschedule/by-patient",
-            headers={"Idempotency-Key": f"reschedule-patient:{appointment_id}:{slot_id}"},
+            headers={
+                "Idempotency-Key": f"reschedule-patient:{appointment_id}:{slot_id}",
+                **internal_service_headers(telegram_user_id=telegram_user_id),
+            },
             json={"new_slot_id": slot_id},
         )
         response.raise_for_status()
@@ -403,19 +466,25 @@ async def _commit_patient_reschedule(chat_id: str, appointment_id: str, slot_id:
     )
 
 
-async def _cancel_appointment(chat_id: str, appointment_id: str, send: bool) -> Screen:
+async def _cancel_appointment(telegram_user_id: str, chat_id: str, appointment_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.post(
             f"{settings.core_api_url}/api/appointments/{appointment_id}/cancel",
-            headers={"Idempotency-Key": f"cancel:{appointment_id}"},
+            headers={
+                "Idempotency-Key": f"cancel:{appointment_id}",
+                **internal_service_headers(telegram_user_id=telegram_user_id),
+            },
         )
         response.raise_for_status()
     return await _respond(chat_id, simple_screen("Запись отменена."), send)
 
 
-async def _approve_reschedule(chat_id: str, approval_request_id: str, send: bool) -> Screen:
+async def _approve_reschedule(telegram_user_id: str, chat_id: str, approval_request_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=8) as client:
-        response = await client.post(f"{settings.core_api_url}/api/reschedule/{approval_request_id}/approve")
+        response = await client.post(
+            f"{settings.core_api_url}/api/reschedule/{approval_request_id}/approve",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
+        )
         response.raise_for_status()
     item = response.json()
     return await _respond(
@@ -425,16 +494,22 @@ async def _approve_reschedule(chat_id: str, approval_request_id: str, send: bool
     )
 
 
-async def _reject_reschedule(chat_id: str, approval_request_id: str, send: bool) -> Screen:
+async def _reject_reschedule(telegram_user_id: str, chat_id: str, approval_request_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=8) as client:
-        response = await client.post(f"{settings.core_api_url}/api/reschedule/{approval_request_id}/reject")
+        response = await client.post(
+            f"{settings.core_api_url}/api/reschedule/{approval_request_id}/reject",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
+        )
         response.raise_for_status()
     return await _respond(chat_id, simple_screen("Перенос отклонён. Текущая запись сохранена."), send)
 
 
 async def _show_pricing(chat_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=5) as client:
-        response = await client.get(f"{settings.core_api_url}/api/services")
+        response = await client.get(
+            f"{settings.core_api_url}/api/services",
+            headers=internal_service_headers(),
+        )
         response.raise_for_status()
     lines = []
     for item in response.json():
@@ -445,8 +520,8 @@ async def _show_pricing(chat_id: str, send: bool) -> Screen:
 async def _show_doctor_calendar(chat_id: str, send: bool) -> Screen:
     async with httpx.AsyncClient(timeout=5) as client:
         response = await client.get(
-            f"{settings.core_api_url}/api/calendar/doctor/doc_therapist",
-            headers={"X-Role": "doctor"},
+            f"{settings.core_api_url}/api/calendar/doctor/doc_therapist/summary",
+            headers=internal_service_headers(),
         )
         response.raise_for_status()
     lines = []
@@ -463,7 +538,10 @@ async def _show_doctor_calendar(chat_id: str, send: bool) -> Screen:
 
 async def _is_registered(telegram_user_id: str) -> bool:
     async with httpx.AsyncClient(timeout=5) as client:
-        response = await client.get(f"{settings.core_api_url}/api/patients/by-telegram/{telegram_user_id}")
+        response = await client.get(
+            f"{settings.core_api_url}/api/patients/by-telegram/{telegram_user_id}",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
+        )
     return response.status_code == 200
 
 
@@ -478,6 +556,7 @@ async def _quick_register(
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.post(
             f"{settings.core_api_url}/api/patients/quick-register",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
             json={
                 "telegram_user_id": telegram_user_id,
                 "chat_id": chat_id,
@@ -500,6 +579,7 @@ async def _register_user(telegram_user_id: str, chat_id: str, username: str | No
     async with httpx.AsyncClient(timeout=5) as client:
         await client.post(
             f"{settings.core_api_url}/api/users/telegram/register",
+            headers=internal_service_headers(telegram_user_id=telegram_user_id),
             json={
                 "telegram_user_id": telegram_user_id,
                 "chat_id": chat_id,
@@ -519,6 +599,31 @@ async def _respond(chat_id: str, screen: Screen, send: bool) -> Screen:
     return screen
 
 
+def _patient_headers(telegram_user_id: str) -> dict[str, str]:
+    return internal_service_headers(telegram_user_id=telegram_user_id)
+
+
+def _telegram_user_id(update: dict) -> str | None:
+    if "message" in update:
+        message = update["message"]
+        chat_id = str(message["chat"]["id"])
+        return str(message.get("from", {}).get("id", chat_id))
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        message = callback.get("message", {})
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        return str(callback.get("from", {}).get("id", chat_id))
+    return None
+
+
+def _chat_id(update: dict) -> str | None:
+    if "message" in update:
+        return str(update["message"]["chat"]["id"])
+    if "callback_query" in update:
+        return str(update["callback_query"].get("message", {}).get("chat", {}).get("id"))
+    return None
+
+
 def _doctor_from_slot_id(slot_id: str) -> str:
     parts = slot_id.split("_")
     if len(parts) >= 4:
@@ -527,4 +632,4 @@ def _doctor_from_slot_id(slot_id: str) -> str:
 
 
 if __name__ == "__main__":
-    uvicorn.run("services.bot_gateway.main:app", host="0.0.0.0", port=8080)
+    uvicorn.run("services.bot_gateway.main:app", host="127.0.0.1", port=8180)

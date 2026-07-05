@@ -8,6 +8,41 @@
 | core-api | `http://127.0.0.1:8100` |
 | ai-orchestrator | `http://127.0.0.1:8101` |
 | crm-mock | `http://127.0.0.1:8102` |
+| admin | `http://127.0.0.1:8190` |
+
+## Заголовки аутентификации
+
+### Core API (`/api/*`)
+
+```http
+X-Service-Token: <INTERNAL_SERVICE_TOKEN>
+```
+
+Для операций от имени пациента (запись, отмена, перенос):
+
+```http
+X-Telegram-User-Id: <telegram user id>
+X-Patient-Proof: <unix_ts>:<hmac-sha256>
+```
+
+Врачебные эндпоинты:
+
+```http
+X-Role: doctor
+X-Telegram-User-Id: <id из doctor.telegram_user_id>
+```
+
+### Admin API (`/api/admin/*`)
+
+```http
+X-Admin-Token: <ADMIN_TOKEN>
+```
+
+### Idempotency
+
+```http
+Idempotency-Key: <уникальный ключ>
+```
 
 ## Bot Gateway
 
@@ -15,7 +50,8 @@
 |-------|------|------|
 | GET | `/health` | — |
 | POST | `/api/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` |
-| POST | `/debug/simulate` | — (только dev) |
+| POST | `/debug/simulate` | `X-Debug-Token` (если `DEBUG_API_ENABLED=true`) |
+| GET | `/debug/ai-call-count` | `X-Debug-Token` |
 
 ## Core API — пользователи и пациенты
 
@@ -41,8 +77,9 @@
 | Метод | Путь | Параметры |
 |-------|------|-----------|
 | GET | `/api/schedule/slots/available` | `service_id`, `doctor_id`, `limit` |
-| GET | `/api/calendar/doctor/{doctor_id}` | Header `X-Role: doctor` |
-| GET | `/api/calendar/patient/{patient_id}` | — |
+| GET | `/api/calendar/doctor/{doctor_id}` | `X-Role: doctor` + проверка ID |
+| GET | `/api/calendar/patient/{patient_id}` | Patient proof |
+| GET | `/api/calendar/summary` | Сводка для админки |
 
 ## Core API — записи
 
@@ -61,6 +98,9 @@
 
 ```http
 POST /api/appointments
+X-Service-Token: <token>
+X-Telegram-User-Id: 1001
+X-Patient-Proof: 1710000000:abc...
 Idempotency-Key: appointment-create:1001:slot_doc_therapist_1_0
 Content-Type: application/json
 
@@ -76,24 +116,40 @@ Content-Type: application/json
 Ответы:
 
 - `201` — запись создана
+- `403` — нет patient proof / чужой patient_id
 - `409` — слот уже занят
 
-## Core API — прочее
+## Core API — внутренние
+
+| Метод | Путь | Auth |
+|-------|------|------|
+| GET | `/api/reminders/due` | `X-Service-Token` |
+| POST | `/api/notifications` | `X-Service-Token` |
+| GET | `/debug/events` | `X-Debug-Token` |
+
+!!! warning "Аудит"
+    Публичный `GET /api/audit` **удалён**. Журнал: `GET /api/admin/audit` с `X-Admin-Token`.
+
+## Admin API
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/api/reminders/due` | Записи для напоминания |
-| POST | `/api/notifications` | Создать уведомление |
-| GET | `/api/audit` | Журнал аудита |
-| GET | `/debug/events` | Опубликованные события (dev) |
+| GET | `/api/admin/dashboard` | Статистика |
+| GET | `/api/admin/appointments` | Список записей |
+| GET | `/api/admin/audit` | Журнал аудита |
+| POST | `/api/admin/demo/run` | Автодемо |
 
 ## AI Orchestrator
 
-| Метод | Путь | Body |
+| Метод | Путь | Auth |
 |-------|------|------|
-| POST | `/api/ai/intake` | `{ "telegram_user_id", "text" }` |
+| POST | `/api/ai/intake` | `X-Service-Token` |
+
+Body: `{ "telegram_user_id", "text" }`
 
 ## CRM Mock
+
+Все пути требуют `X-Service-Token`.
 
 | Метод | Путь |
 |-------|------|

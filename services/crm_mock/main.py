@@ -1,11 +1,14 @@
-import random
-from datetime import date
+import time
 
+import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
 from shared.config import get_settings
 from shared.schemas import PatientLookupRequest
+from shared.security import safe_compare_digest
+from shared.startup_checks import warn_insecure_defaults
 
 settings = get_settings()
 app = FastAPI(title="Dental CRM/SRM Mock", version="0.1.0")
@@ -17,12 +20,34 @@ KNOWN_PATIENTS = {
         "exists": True,
         "isPrimary": False,
         "name": "Иван Иванов",
-        "lastVisitDate": str(date.today().replace(day=1)),
+        "lastVisitDate": "2026-07-01",
         "lastDoctorId": "doc_therapist",
     }
 }
 
 SYNCED_APPOINTMENTS: list[dict] = []
+
+
+@app.middleware("http")
+async def enforce_internal_service_token(request: Request, call_next):
+    path = request.url.path
+    if path == "/health":
+        return await call_next(request)
+    expected = settings.internal_service_token
+    if not expected or not safe_compare_digest(
+        request.headers.get("X-Service-Token", ""),
+        expected,
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Invalid service token"},
+        )
+    return await call_next(request)
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    warn_insecure_defaults()
 
 
 @app.get("/health")
@@ -32,7 +57,11 @@ def health() -> dict[str, str]:
 
 @app.post("/crm/patients/lookup")
 def lookup_patient(payload: PatientLookupRequest) -> dict:
-    if _should_fail():
+    import random
+
+    if random.random() < settings.crm_mock_failure_rate:
+        from fastapi import HTTPException
+
         raise HTTPException(status_code=503, detail="CRM is temporarily unavailable")
     if payload.phone and payload.phone in KNOWN_PATIENTS:
         return KNOWN_PATIENTS[payload.phone]
@@ -68,16 +97,16 @@ def services() -> list[dict]:
 
 @app.post("/crm/appointments/sync")
 def sync_appointment(payload: dict) -> dict:
-    if _should_fail():
+    import random
+
+    if random.random() < settings.crm_mock_failure_rate:
+        from fastapi import HTTPException
+
         raise HTTPException(status_code=503, detail="CRM sync failed")
     crm_id = f"crm_apt_{len(SYNCED_APPOINTMENTS) + 9001}"
     SYNCED_APPOINTMENTS.append({"crmAppointmentId": crm_id, **payload})
     return {"crmAppointmentId": crm_id, "status": "synced"}
 
 
-def _should_fail() -> bool:
-    return random.random() < settings.crm_mock_failure_rate
-
-
 if __name__ == "__main__":
-    uvicorn.run("services.crm_mock.main:app", host="0.0.0.0", port=8002)
+    uvicorn.run("services.crm_mock.main:app", host="127.0.0.1", port=8002)

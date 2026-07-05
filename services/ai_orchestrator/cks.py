@@ -38,7 +38,7 @@ def route_text(text: str) -> Route:
             specialty="Стоматолог-хирург",
             doctor_id="doc_surgeon",
             service_id="svc_extraction",
-            visit_type="primary_consultation",
+            visit_type="extraction",
             duration_minutes=60,
             confidence=0.86,
         )
@@ -48,7 +48,7 @@ def route_text(text: str) -> Route:
             specialty="Стоматолог-терапевт",
             doctor_id="doc_therapist",
             service_id="svc_hygiene",
-            visit_type="primary_consultation",
+            visit_type="hygiene",
             duration_minutes=60,
             confidence=0.84,
         )

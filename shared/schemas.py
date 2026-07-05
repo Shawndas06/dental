@@ -15,6 +15,9 @@ class AppointmentStatus(StrEnum):
 class VisitType(StrEnum):
     PRIMARY = "primary_consultation"
     SECONDARY = "secondary_visit"
+    HYGIENE = "hygiene"
+    EXTRACTION = "extraction"
+    TREATMENT = "treatment"
 
 
 class RescheduleStatus(StrEnum):

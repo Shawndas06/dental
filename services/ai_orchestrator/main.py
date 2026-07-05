@@ -1,5 +1,6 @@
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 import httpx
 
 from services.ai_orchestrator.cks import classify_text, route_text
@@ -13,9 +14,30 @@ from services.ai_orchestrator.safety import (
 from shared.callbacks import build_callback
 from shared.config import get_settings
 from shared.schemas import Button, IntakeRequest, IntakeResponse
+from shared.security import SlidingWindowRateLimiter, safe_compare_digest
+from shared.service_auth import internal_service_headers
 
 settings = get_settings()
 app = FastAPI(title="Dental AI Orchestrator", version="0.1.0")
+intake_limiter = SlidingWindowRateLimiter(limit=30, window_seconds=60)
+
+
+@app.middleware("http")
+async def enforce_internal_service_token(request: Request, call_next):
+    path = request.url.path
+    if path == "/health":
+        return await call_next(request)
+    if path.startswith("/api/"):
+        expected = settings.internal_service_token
+        if not expected or not safe_compare_digest(
+            request.headers.get("X-Service-Token", ""),
+            expected,
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid service token"},
+            )
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -25,6 +47,9 @@ def health() -> dict[str, str]:
 
 @app.post("/api/ai/intake", response_model=IntakeResponse)
 async def intake(payload: IntakeRequest) -> IntakeResponse:
+    if not intake_limiter.allow(payload.telegram_user_id):
+        return low_confidence_fallback()
+
     if is_clinical_question(payload.text):
         return safe_refusal()
 
@@ -37,17 +62,23 @@ async def intake(payload: IntakeRequest) -> IntakeResponse:
         return low_confidence_fallback()
 
     route = route_text(payload.text)
+    headers = internal_service_headers(telegram_user_id=payload.telegram_user_id)
     async with httpx.AsyncClient(timeout=5) as client:
         await client.post(
             f"{settings.core_api_url}/api/patients/lookup",
+            headers=headers,
             json={
                 "telegram_user_id": payload.telegram_user_id,
                 "phone": payload.phone,
             },
         )
-        services_response = await client.get(f"{settings.core_api_url}/api/services")
+        services_response = await client.get(
+            f"{settings.core_api_url}/api/services",
+            headers=headers,
+        )
         slots_response = await client.get(
             f"{settings.core_api_url}/api/schedule/slots/available",
+            headers=headers,
             params={"doctor_id": route.doctor_id, "service_id": route.service_id, "limit": 4},
         )
     services_response.raise_for_status()

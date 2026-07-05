@@ -65,6 +65,45 @@ def require_permission(role: str, permission: str) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 
+def safe_compare_digest(provided: str, expected: str) -> bool:
+    if not expected or not provided:
+        return False
+    if len(provided) != len(expected):
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+def verify_debug_access(
+    x_debug_token: str | None = Header(default=None, alias="X-Debug-Token"),
+) -> None:
+    from shared.config import get_settings
+
+    settings = get_settings()
+    if not settings.debug_api_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    expected = settings.debug_api_token or settings.admin_token
+    if not expected:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Debug API not configured")
+    if not safe_compare_digest(x_debug_token or "", expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid debug token")
+
+
+def verify_service_token(
+    x_service_token: str | None = Header(default=None, alias="X-Service-Token"),
+) -> None:
+    from shared.config import get_settings
+
+    settings = get_settings()
+    expected = settings.internal_service_token
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="INTERNAL_SERVICE_TOKEN is not configured",
+        )
+    if not safe_compare_digest(x_service_token or "", expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid service token")
+
+
 def verify_webhook_secret(
     expected_secret: str,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
@@ -72,7 +111,7 @@ def verify_webhook_secret(
     if not expected_secret:
         return
     provided = x_telegram_bot_api_secret_token or ""
-    if not hmac.compare_digest(provided, expected_secret):
+    if len(provided) != len(expected_secret) or not hmac.compare_digest(provided, expected_secret):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
 
 

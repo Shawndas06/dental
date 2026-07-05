@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     admin_token: str = "change-me-admin-token"
     admin_port: int = 8190
     bot_gateway_url: str = "http://127.0.0.1:8180"
+    internal_service_token: str = ""
+    debug_api_enabled: bool = False
+    debug_api_token: str = ""
+    notify_telegram_username: str = ""
 
     @property
     def doctor_ids(self) -> set[str]:

@@ -24,9 +24,11 @@
       </ol>
       <div class="actions">
         <form method="post" action="/demo/run" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="btn">Запустить демо</button>
         </form>
         <form method="post" action="/demo/reset" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="btn btn-danger">Только сброс</button>
         </form>
       </div>

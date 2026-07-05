@@ -7,9 +7,26 @@ from typing import Any
 
 import httpx
 
+from shared.config import get_settings
+from shared.service_auth import internal_service_headers
+
 
 DEMO_TELEGRAM_USER_ID = "999000001"
 DEMO_CHAT_ID = "999000001"
+
+
+def _debug_headers(admin_token: str = "") -> dict[str, str]:
+    settings = get_settings()
+    token = settings.debug_api_token or settings.admin_token or admin_token
+    return {"X-Debug-Token": token} if token else {}
+
+
+def _service_headers(**extra: str) -> dict[str, str]:
+    return internal_service_headers(**extra)
+
+
+def _patient_headers(telegram_user_id: str = DEMO_TELEGRAM_USER_ID) -> dict[str, str]:
+    return internal_service_headers(telegram_user_id=telegram_user_id)
 
 
 @dataclass
@@ -64,6 +81,7 @@ async def _step_register(client: httpx.AsyncClient, core_api_url: str) -> DemoSt
     try:
         response = await client.post(
             f"{core_api_url}/api/patients/quick-register",
+            headers=_service_headers(telegram_user_id=DEMO_TELEGRAM_USER_ID),
             json={
                 "telegram_user_id": DEMO_TELEGRAM_USER_ID,
                 "chat_id": DEMO_CHAT_ID,
@@ -87,6 +105,7 @@ async def _step_ai_intake(client: httpx.AsyncClient, ai_url: str) -> DemoStep:
     try:
         response = await client.post(
             f"{ai_url}/api/ai/intake",
+            headers=_service_headers(telegram_user_id=DEMO_TELEGRAM_USER_ID),
             json={
                 "telegram_user_id": DEMO_TELEGRAM_USER_ID,
                 "text": "Болит зуб слева уже неделю",
@@ -110,6 +129,7 @@ async def _step_bot_start(client: httpx.AsyncClient, bot_url: str) -> DemoStep:
     try:
         response = await client.post(
             f"{bot_url}/debug/simulate",
+            headers=_debug_headers(),
             json={
                 "message": {
                     "chat": {"id": int(DEMO_CHAT_ID)},
@@ -130,6 +150,7 @@ async def _step_book_via_bot(client: httpx.AsyncClient, bot_url: str, core_api_u
     try:
         slots_response = await client.get(
             f"{core_api_url}/api/schedule/slots/available",
+            headers=_service_headers(),
             params={"service_id": "svc_primary", "limit": 1},
         )
         slots_response.raise_for_status()
@@ -137,8 +158,21 @@ async def _step_book_via_bot(client: httpx.AsyncClient, bot_url: str, core_api_u
         if not slots:
             return DemoStep("Запись через кнопку слота", False, "Нет свободных слотов")
         slot_id = slots[0]["slot_id"]
+        await client.post(
+            f"{bot_url}/debug/simulate",
+            headers=_debug_headers(),
+            json={
+                "callback_query": {
+                    "id": "demo-0",
+                    "from": {"id": int(DEMO_TELEGRAM_USER_ID), "username": "demo_client"},
+                    "message": {"chat": {"id": int(DEMO_CHAT_ID)}},
+                    "data": "service:select:svc_primary",
+                }
+            },
+        )
         simulate = await client.post(
             f"{bot_url}/debug/simulate",
+            headers=_debug_headers(),
             json={
                 "callback_query": {
                     "id": "demo-1",
@@ -152,11 +186,13 @@ async def _step_book_via_bot(client: httpx.AsyncClient, bot_url: str, core_api_u
         screen = simulate.json()
         patient = await client.post(
             f"{core_api_url}/api/patients/lookup",
+            headers=_service_headers(telegram_user_id=DEMO_TELEGRAM_USER_ID),
             json={"telegram_user_id": DEMO_TELEGRAM_USER_ID},
         )
         patient.raise_for_status()
         appointments = await client.get(
-            f"{core_api_url}/api/appointments/patient/{patient.json()['patient_id']}"
+            f"{core_api_url}/api/appointments/patient/{patient.json()['patient_id']}",
+            headers=_patient_headers(),
         )
         appointments.raise_for_status()
         items = appointments.json()
@@ -175,6 +211,7 @@ async def _step_clinical_refusal(client: httpx.AsyncClient, ai_url: str) -> Demo
     try:
         response = await client.post(
             f"{ai_url}/api/ai/intake",
+            headers=_service_headers(telegram_user_id=DEMO_TELEGRAM_USER_ID),
             json={"telegram_user_id": DEMO_TELEGRAM_USER_ID, "text": "Что у меня за болезнь?"},
         )
         response.raise_for_status()
@@ -189,6 +226,7 @@ async def _step_unknown_service(client: httpx.AsyncClient, ai_url: str) -> DemoS
     try:
         response = await client.post(
             f"{ai_url}/api/ai/intake",
+            headers=_service_headers(telegram_user_id=DEMO_TELEGRAM_USER_ID),
             json={"telegram_user_id": DEMO_TELEGRAM_USER_ID, "text": "Хочу имплантацию"},
         )
         response.raise_for_status()
@@ -208,6 +246,7 @@ async def _step_list_appointments(client: httpx.AsyncClient, bot_url: str) -> De
     try:
         response = await client.post(
             f"{bot_url}/debug/simulate",
+            headers=_debug_headers(),
             json={
                 "callback_query": {
                     "id": "demo-2",

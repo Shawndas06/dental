@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-dental}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dental}
     ports:
-      - "${POSTGRES_PORT:-55432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +19,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-6380}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -32,8 +32,8 @@ services:
     image: nats:2.10-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "${NATS_PORT:-4224}:4222"
-      - "${NATS_MONITOR_PORT:-8224}:8222"
+      - "127.0.0.1:${NATS_PORT:-4224}:4222"
+      - "127.0.0.1:${NATS_MONITOR_PORT:-8224}:8222"
     volumes:
       - nats_data:/data
     healthcheck:
@@ -53,8 +53,9 @@ services:
         required: false
     environment:
       CRM_MOCK_FAILURE_RATE: ${CRM_MOCK_FAILURE_RATE:-0}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
     ports:
-      - "${CRM_MOCK_PORT:-8102}:8002"
+      - "127.0.0.1:${CRM_MOCK_PORT:-8102}:8002"
     healthcheck:
       test:
         [
@@ -78,8 +79,13 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
       CRM_MOCK_URL: ${CRM_MOCK_URL:-http://crm-mock:8002}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
+      BOT_GATEWAY_URL: http://host.docker.internal:8180
+      AI_ORCHESTRATOR_URL: http://ai-orchestrator:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "${CORE_API_PORT:-8100}:8000"
+      - "127.0.0.1:${CORE_API_PORT:-8100}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -111,8 +117,9 @@ services:
       CORE_API_URL: ${CORE_API_URL:-http://core-api:8000}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
       AI_MODE: ${AI_MODE:-rules}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
     ports:
-      - "${AI_ORCHESTRATOR_PORT:-8101}:8001"
+      - "127.0.0.1:${AI_ORCHESTRATOR_PORT:-8101}:8001"
     depends_on:
       core-api:
         condition: service_healthy
@@ -140,7 +147,10 @@ services:
       AI_ORCHESTRATOR_URL: http://127.0.0.1:8101
       REDIS_URL: redis://127.0.0.1:6380
       TELEGRAM_MODE: ${TELEGRAM_MODE:-polling}
-      TELEGRAM_PROXY_URL: http://127.0.0.1:20170
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
+      DEBUG_API_ENABLED: ${DEBUG_API_ENABLED:-false}
+      DEBUG_API_TOKEN: ${DEBUG_API_TOKEN:-}
     depends_on:
       core-api:
         condition: service_healthy
@@ -171,25 +181,49 @@ services:
       CORE_API_URL: http://127.0.0.1:8100
       NATS_URL: nats://127.0.0.1:4224
       TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
-      TELEGRAM_PROXY_URL: http://127.0.0.1:20170
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
     depends_on:
       core-api:
         condition: service_healthy
       nats:
         condition: service_healthy
 
+  docs:
+    build:
+      context: .
+      dockerfile: Dockerfile.docs
+      network: host
+    ports:
+      - "127.0.0.1:${DOCS_PORT:-8008}:8008"
+    volumes:
+      - ./docs:/app/docs:ro
+      - ./mkdocs.yml:/app/mkdocs.yml:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   admin:
     build:
       context: .
       network: host
     network_mode: host
-    command: ["uvicorn", "services.admin.main:app", "--host", "0.0.0.0", "--port", "8190"]
+    command: ["uvicorn", "services.admin.main:app", "--host", "127.0.0.1", "--port", "8190"]
     env_file: *app_env
     environment:
       CORE_API_URL: http://127.0.0.1:8100
       BOT_GATEWAY_URL: http://127.0.0.1:8180
       AI_ORCHESTRATOR_URL: http://127.0.0.1:8101
       ADMIN_TOKEN: ${ADMIN_TOKEN:-change-me-admin-token}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-change-me-internal-token}
     depends_on:
       core-api:
         condition: service_healthy

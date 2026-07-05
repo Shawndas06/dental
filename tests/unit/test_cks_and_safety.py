@@ -1,8 +1,9 @@
 import pytest
 
 from services.ai_orchestrator.cks import classify_text, route_text
-from services.ai_orchestrator.safety import safe_refusal, validate_ai_screen
+from services.ai_orchestrator.safety import is_clinical_question, safe_refusal, validate_ai_screen
 from shared.schemas import Button, IntakeResponse
+from shared.service_visits import visit_type_for_service
 
 
 def test_pain_routes_to_primary_therapist() -> None:
@@ -21,6 +22,17 @@ def test_clinical_question_is_refused() -> None:
     assert response.intent == "clinical_question"
     assert "не могу ставить диагноз" in response.text.lower()
     assert response.llm_called is False
+
+
+def test_antibiotics_question_is_clinical() -> None:
+    assert is_clinical_question("какие антибиотики пить при флюсе?") is True
+
+
+def test_hygiene_route_visit_type() -> None:
+    route = route_text("Нужна профессиональная чистка")
+    assert route.service_id == "svc_hygiene"
+    assert route.visit_type == "hygiene"
+    assert visit_type_for_service("svc_hygiene") == "hygiene"
 
 
 def test_validator_rejects_unknown_slot() -> None:

@@ -1,16 +1,24 @@
-# Secrets
+# --- Secrets & environment (keep templates) ---
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
 *.pem
 *.key
+*.p12
+*.cer
+credentials.json
+secrets.json
+service-account*.json
+**/secrets/
 
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
 build/
 develop-eggs/
 dist/
@@ -23,18 +31,22 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Virtual environments
+# --- Virtual environments ---
 .venv/
 venv/
 ENV/
 env/
+.python-version
 
-# Testing & coverage
+# --- Testing & coverage ---
 .pytest_cache/
 .coverage
 .coverage.*
@@ -44,27 +56,47 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
+nosetests.xml
+test-results/
+junit.xml
 
-# Type checkers & linters
+# Local SQLite (pytest / dev)
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Type checkers & linters ---
 .mypy_cache/
 .ruff_cache/
+.pytype/
 .dmypy.json
 dmypy.json
 
-# MkDocs
+# --- MkDocs ---
 site/
+.cache/
 
-# IDEs
+# --- Archives & exports ---
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# --- IDEs & editors ---
 .idea/
 .vscode/
+*.code-workspace
 *.swp
 *.swo
 *~
 .project
 .pydevproject
 .settings/
+*.sublime-project
+*.sublime-workspace
 
-# OS
+# --- OS ---
 .DS_Store
 .DS_Store?
 ._*
@@ -73,20 +105,38 @@ site/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+$RECYCLE.BIN/
 
-# Docker (local overrides, not compose files)
+# --- Docker (local overrides only) ---
 docker-compose.override.yml
 docker-compose.*.local.yml
 
-# Logs & temp
+# --- Logs & temp ---
 *.log
 logs/
+log/
 tmp/
 temp/
+*.tmp
+*.bak
+*.orig
 
-# Database dumps (local dev)
+# --- Database dumps (local dev) ---
 *.sql
 *.dump
+dumps/
 
-# Jupyter
+# --- Tunnels / proxies (local config) ---
+.ngrok2/
+ngrok.yml
+.cloudflared/
+
+# --- Jupyter ---
 .ipynb_checkpoints/
+
+# --- Node (if frontend tooling is added later) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*

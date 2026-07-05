@@ -1,0 +1,22 @@
+app = 'dental-mvp-ai'
+primary_region = 'ams'
+
+[build]
+  dockerfile = "../../Dockerfile"
+  build-context = "../.."
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[processes]
+  app = 'uvicorn services.ai_orchestrator.main:app --host 0.0.0.0 --port 8080'
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1

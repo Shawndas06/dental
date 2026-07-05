@@ -1,0 +1,14 @@
+app = 'dental-mvp-worker'
+primary_region = 'ams'
+
+[build]
+  dockerfile = "../../Dockerfile"
+  build-context = "../.."
+
+[processes]
+  app = 'python -m services.worker.main'
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1

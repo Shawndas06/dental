@@ -1,3 +1,4 @@
+from shared.service_visits import visit_type_for_service
 from shared.schemas import Button, Screen
 
 BACK = Button(text="Назад", callback_data="nav:back")
@@ -82,7 +83,10 @@ def slots_screen(slots: list[dict], service_id: str) -> Screen:
     return Screen(
         text="Свободные слоты\n\nЗапись создаётся только после выбора времени.",
         buttons=buttons,
-        conversation_state={"serviceId": service_id},
+        conversation_state={
+            "serviceId": service_id,
+            "visitType": visit_type_for_service(service_id),
+        },
     )
 
 

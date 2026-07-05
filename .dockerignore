@@ -1,12 +1,69 @@
+# Secrets (runtime uses env vars / fly secrets, not files in image)
 .env
 .env.*
-!.env.example
-.venv
-.pytest_cache
-__pycache__
-*.pyc
-.git
+.env.fly
+
+# Python / tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.egg-info/
+dist/
+build/
+
+# Local databases & dumps
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+
+# Git & editor
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*~
+
+# MkDocs — not needed in app images (docs image copies docs/ explicitly)
+site/
+.cache/
+
+# Deploy configs — not used inside containers
+fly/
+
+# Tests — not used at runtime
+tests/
+
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+
+# Project docs & specs (not read by services at runtime)
 *.md
+docs/
+docs.zip
 TZ_*
 method_*
 CR_*
+STOMATOLOGY_*
+
+# Docs-only Dockerfile in main app builds
+Dockerfile.docs
+
+# OS noise
+.DS_Store
+Thumbs.db

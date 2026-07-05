@@ -5,6 +5,7 @@ from typing import Annotated
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -44,7 +45,10 @@ from shared.schemas import (
     UserCreate,
     UserRead,
 )
-from shared.security import require_permission
+from shared.security import require_permission, safe_compare_digest, verify_debug_access
+from shared.patient_proof import verify_patient_proof
+from shared.service_auth import internal_service_headers
+from shared.startup_checks import warn_insecure_defaults
 
 settings = get_settings()
 app = FastAPI(title="Dental Bot Core API", version="0.1.0")
@@ -55,8 +59,27 @@ publisher = EventPublisher(settings.nats_url)
 Db = Annotated[Session, Depends(get_db)]
 
 
+@app.middleware("http")
+async def enforce_internal_service_token(request: Request, call_next):
+    path = request.url.path
+    if path == "/health" or path.startswith("/debug/") or path.startswith("/api/admin/"):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        expected = get_settings().internal_service_token
+        if not expected or not safe_compare_digest(
+            request.headers.get("X-Service-Token", ""),
+            expected,
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid service token"},
+            )
+    return await call_next(request)
+
+
 @app.on_event("startup")
 async def startup() -> None:
+    warn_insecure_defaults()
     create_schema()
     with next(get_db()) as db:
         seed_demo_data(db)
@@ -75,7 +98,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/debug/events")
-def debug_events() -> list[dict]:
+def debug_events(_: Annotated[None, Depends(verify_debug_access)]) -> list[dict]:
     return [
         {"subject": subject, "event": event.model_dump(mode="json")}
         for subject, event in publisher.published
@@ -120,7 +143,15 @@ async def lookup_patient(payload: PatientLookupRequest, db: Db) -> PatientRead:
 
 
 @app.get("/api/patients/by-telegram/{telegram_user_id}", response_model=PatientRead)
-def get_patient_by_telegram(telegram_user_id: str, db: Db) -> PatientRead:
+def get_patient_by_telegram(
+    telegram_user_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+) -> PatientRead:
+    if x_telegram_user_id != telegram_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    verify_patient_proof(telegram_user_id, x_patient_proof)
     patient = db.scalar(select(Patient).where(Patient.telegram_user_id == telegram_user_id))
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -225,14 +256,43 @@ def available_slots(
 
 
 @app.get("/api/calendar/doctor/{doctor_id}", response_model=list[AppointmentRead])
-def doctor_calendar(doctor_id: str, db: Db, x_role: str = Header(default="doctor")) -> list[AppointmentRead]:
-    require_permission(x_role, "calendar:read:doctor")
+def doctor_calendar(
+    doctor_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_role: str = Header(default="doctor"),
+) -> list[AppointmentRead]:
+    _require_doctor_or_staff(x_telegram_user_id, x_role, doctor_id, db)
     appointments = db.scalars(select(Appointment).where(Appointment.doctor_id == doctor_id)).all()
     return [_appointment_read(item) for item in appointments]
 
 
+@app.get("/api/calendar/doctor/{doctor_id}/summary")
+def doctor_calendar_summary(doctor_id: str, db: Db) -> list[dict]:
+    """Публичная сводка: только дата/время занятых слотов, без данных пациентов."""
+    if not db.get(Doctor, doctor_id):
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    appointments = db.scalars(
+        select(Appointment).where(
+            Appointment.doctor_id == doctor_id,
+            Appointment.status.in_([AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED, AppointmentStatus.WAITING_PATIENT_APPROVAL]),
+        )
+    ).all()
+    return [
+        {"date": item.date.isoformat(), "time": item.time.isoformat(timespec="minutes"), "status": "booked"}
+        for item in appointments
+    ]
+
+
 @app.get("/api/calendar/patient/{patient_id}", response_model=list[AppointmentRead])
-def patient_calendar(patient_id: str, db: Db) -> list[AppointmentRead]:
+def patient_calendar(
+    patient_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+) -> list[AppointmentRead]:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
+    _require_patient_access(db, patient_id, x_telegram_user_id)
     appointments = db.scalars(select(Appointment).where(Appointment.patient_id == patient_id)).all()
     return [_appointment_read(item) for item in appointments]
 
@@ -240,10 +300,13 @@ def patient_calendar(patient_id: str, db: Db) -> list[AppointmentRead]:
 @app.post("/api/appointments", response_model=AppointmentRead, status_code=status.HTTP_201_CREATED)
 async def create_appointment(
     payload: AppointmentCreate,
-    request: Request,
     db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
     idempotency_key: str = Header(default=""),
 ) -> AppointmentRead:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
+    _require_patient_access(db, payload.patient_id, x_telegram_user_id)
     key = idempotency_key or f"appointment-create:{payload.patient_id}:{payload.slot_id}"
     cached = db.get(IdempotencyRecord, key)
     if cached:
@@ -277,25 +340,47 @@ async def create_appointment(
     response = _appointment_read(appointment)
     db.add(IdempotencyRecord(key=key, response=response.model_dump(mode="json")))
     db.commit()
-    await _publish("appointments.created", key, response.model_dump(mode="json"))
-    await _publish("crm.appointment.sync_requested", f"crm-sync:{appointment.appointment_id}", response.model_dump(mode="json"))
+    event_payload = response.model_dump(mode="json")
+    event_payload["chat_id"] = _patient_chat_id(db, payload.patient_id)
+    await _publish("appointments.created", key, event_payload)
+    await _publish("crm.appointment.sync_requested", f"crm-sync:{appointment.appointment_id}", event_payload)
     return response
 
 
 @app.get("/api/appointments/patient/{patient_id}", response_model=list[AppointmentRead])
-def patient_appointments(patient_id: str, db: Db) -> list[AppointmentRead]:
+def patient_appointments(
+    patient_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+) -> list[AppointmentRead]:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
+    _require_patient_access(db, patient_id, x_telegram_user_id)
     return [_appointment_read(item) for item in db.scalars(select(Appointment).where(Appointment.patient_id == patient_id)).all()]
 
 
 @app.get("/api/appointments/doctor/{doctor_id}", response_model=list[AppointmentRead])
-def doctor_appointments(doctor_id: str, db: Db, x_role: str = Header(default="doctor")) -> list[AppointmentRead]:
-    require_permission(x_role, "appointment:list:doctor")
+def doctor_appointments(
+    doctor_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_role: str = Header(default="doctor"),
+) -> list[AppointmentRead]:
+    _require_doctor_or_staff(x_telegram_user_id, x_role, doctor_id, db)
     return [_appointment_read(item) for item in db.scalars(select(Appointment).where(Appointment.doctor_id == doctor_id)).all()]
 
 
 @app.post("/api/appointments/{appointment_id}/cancel", response_model=AppointmentRead)
-async def cancel_appointment(appointment_id: str, db: Db, idempotency_key: str = Header(default="")) -> AppointmentRead:
+async def cancel_appointment(
+    appointment_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+    idempotency_key: str = Header(default=""),
+) -> AppointmentRead:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
     appointment = _appointment_or_404(db, appointment_id)
+    _require_appointment_owner(db, appointment, x_telegram_user_id)
     key = idempotency_key or f"appointment-cancel:{appointment_id}"
     cached = db.get(IdempotencyRecord, key)
     if cached:
@@ -309,7 +394,9 @@ async def cancel_appointment(appointment_id: str, db: Db, idempotency_key: str =
     response = _appointment_read(appointment)
     db.add(IdempotencyRecord(key=key, response=response.model_dump(mode="json")))
     db.commit()
-    await _publish("appointments.cancelled", key, response.model_dump(mode="json"))
+    event_payload = response.model_dump(mode="json")
+    event_payload["chat_id"] = _patient_chat_id(db, appointment.patient_id)
+    await _publish("appointments.cancelled", key, event_payload)
     return response
 
 
@@ -318,9 +405,13 @@ async def reschedule_by_patient(
     appointment_id: str,
     payload: PatientRescheduleRequest,
     db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
     idempotency_key: str = Header(default=""),
 ) -> AppointmentRead:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
     appointment = _appointment_or_404(db, appointment_id)
+    _require_appointment_owner(db, appointment, x_telegram_user_id)
     key = idempotency_key or f"reschedule-patient:{appointment_id}:{payload.new_slot_id}"
     cached = db.get(IdempotencyRecord, key)
     if cached:
@@ -340,7 +431,9 @@ async def reschedule_by_patient(
     response = _appointment_read(appointment)
     db.add(IdempotencyRecord(key=key, response=response.model_dump(mode="json")))
     db.commit()
-    await _publish("appointments.rescheduled.by_patient", key, response.model_dump(mode="json"))
+    event_payload = response.model_dump(mode="json")
+    event_payload["chat_id"] = _patient_chat_id(db, appointment.patient_id)
+    await _publish("appointments.rescheduled.by_patient", key, event_payload)
     return response
 
 
@@ -350,9 +443,10 @@ async def request_reschedule_by_doctor(
     payload: DoctorRescheduleRequest,
     db: Db,
     idempotency_key: str = Header(default=""),
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
     x_role: str = Header(default="doctor"),
 ) -> RescheduleRead:
-    require_permission(x_role, "reschedule:request:doctor")
+    _require_doctor_or_staff(x_telegram_user_id, x_role, payload.doctor_id, db)
     appointment = _appointment_or_404(db, appointment_id)
     if appointment.doctor_id != payload.doctor_id:
         raise HTTPException(status_code=403, detail="Doctor can reschedule only own appointments")
@@ -383,13 +477,21 @@ async def request_reschedule_by_doctor(
 
 
 @app.post("/api/reschedule/{approval_request_id}/approve", response_model=AppointmentRead)
-async def approve_reschedule(approval_request_id: str, db: Db, idempotency_key: str = Header(default="")) -> AppointmentRead:
+async def approve_reschedule(
+    approval_request_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+    idempotency_key: str = Header(default=""),
+) -> AppointmentRead:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
     request = _reschedule_or_404(db, approval_request_id)
+    appointment = _appointment_or_404(db, request.appointment_id)
+    _require_appointment_owner(db, appointment, x_telegram_user_id)
     key = idempotency_key or f"reschedule-approve:{approval_request_id}"
     cached = db.get(IdempotencyRecord, key)
     if cached:
         return AppointmentRead.model_validate(cached.response)
-    appointment = _appointment_or_404(db, request.appointment_id)
     new_slot = db.get(Slot, request.proposed_slot_id)
     old_slot = db.get(Slot, request.old_slot_id)
     if not new_slot or new_slot.status not in {"available", "reserved"}:
@@ -408,13 +510,24 @@ async def approve_reschedule(approval_request_id: str, db: Db, idempotency_key: 
     response = _appointment_read(appointment)
     db.add(IdempotencyRecord(key=key, response=response.model_dump(mode="json")))
     db.commit()
-    await _publish("appointments.reschedule.approved_by_patient", key, response.model_dump(mode="json"))
+    event_payload = response.model_dump(mode="json")
+    event_payload["chat_id"] = _patient_chat_id(db, appointment.patient_id)
+    await _publish("appointments.reschedule.approved_by_patient", key, event_payload)
     return response
 
 
 @app.post("/api/reschedule/{approval_request_id}/reject", response_model=RescheduleRead)
-async def reject_reschedule(approval_request_id: str, db: Db, idempotency_key: str = Header(default="")) -> RescheduleRead:
+async def reject_reschedule(
+    approval_request_id: str,
+    db: Db,
+    x_telegram_user_id: str = Header(alias="X-Telegram-User-Id"),
+    x_patient_proof: str | None = Header(default=None, alias="X-Patient-Proof"),
+    idempotency_key: str = Header(default=""),
+) -> RescheduleRead:
+    verify_patient_proof(x_telegram_user_id, x_patient_proof)
     request = _reschedule_or_404(db, approval_request_id)
+    appointment = _appointment_or_404(db, request.appointment_id)
+    _require_appointment_owner(db, appointment, x_telegram_user_id)
     key = idempotency_key or f"reschedule-reject:{approval_request_id}"
     cached = db.get(IdempotencyRecord, key)
     if cached:
@@ -423,19 +536,20 @@ async def reject_reschedule(approval_request_id: str, db: Db, idempotency_key: s
     proposed_slot = db.get(Slot, request.proposed_slot_id)
     if proposed_slot and proposed_slot.status == "reserved":
         proposed_slot.status = "available"
-    appointment = _appointment_or_404(db, request.appointment_id)
     appointment.status = AppointmentStatus.CONFIRMED
     db.add(AuditEvent(event_type="appointments.reschedule.rejected_by_patient", actor_id=appointment.patient_id, payload={"approvalRequestId": approval_request_id}))
     db.commit()
     response = _reschedule_read(request)
     db.add(IdempotencyRecord(key=key, response=response.model_dump(mode="json")))
     db.commit()
-    await _publish("appointments.reschedule.rejected_by_patient", key, response.model_dump(mode="json"))
+    event_payload = response.model_dump(mode="json")
+    event_payload["chat_id"] = _patient_chat_id(db, appointment.patient_id)
+    await _publish("appointments.reschedule.rejected_by_patient", key, event_payload)
     return response
 
 
-@app.get("/api/reminders/due", response_model=list[AppointmentRead])
-def due_reminders(db: Db) -> list[AppointmentRead]:
+@app.get("/api/reminders/due")
+def due_reminders(db: Db) -> list[dict]:
     target = datetime.now(UTC) + timedelta(hours=24)
     start = target - timedelta(minutes=30)
     end = target + timedelta(minutes=30)
@@ -448,7 +562,9 @@ def due_reminders(db: Db) -> list[AppointmentRead]:
     for appointment in appointments:
         appointment_dt = datetime.combine(appointment.date, appointment.time, tzinfo=UTC)
         if start <= appointment_dt <= end:
-            due.append(_appointment_read(appointment))
+            item = _appointment_read(appointment).model_dump(mode="json")
+            item["chat_id"] = _patient_chat_id(db, appointment.patient_id)
+            due.append(item)
     return due
 
 
@@ -461,26 +577,12 @@ def create_notification(payload: NotificationCreate, db: Db) -> dict[str, str]:
     return {"notificationId": item.notification_id, "status": item.status}
 
 
-@app.get("/api/audit")
-def list_audit(db: Db) -> list[dict]:
-    events = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc())).all()
-    return [
-        {
-            "auditId": event.audit_id,
-            "eventType": event.event_type,
-            "actorId": event.actor_id,
-            "payload": event.payload,
-            "createdAt": event.created_at.isoformat(),
-        }
-        for event in events
-    ]
-
-
 async def _lookup_crm(payload: PatientLookupRequest) -> dict:
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.post(
                 f"{settings.crm_mock_url}/crm/patients/lookup",
+                headers=internal_service_headers(),
                 json=payload.model_dump(),
             )
             response.raise_for_status()
@@ -514,6 +616,43 @@ def _reschedule_or_404(db: Session, approval_request_id: str) -> RescheduleReque
     if not request:
         raise HTTPException(status_code=404, detail="Reschedule request not found")
     return request
+
+
+def _require_patient_access(db: Session, patient_id: str, telegram_user_id: str) -> None:
+    patient = db.get(Patient, patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if patient.telegram_user_id != telegram_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _require_appointment_owner(db: Session, appointment: Appointment, telegram_user_id: str) -> None:
+    _require_patient_access(db, appointment.patient_id, telegram_user_id)
+
+
+def _require_doctor_or_staff(
+    telegram_user_id: str,
+    x_role: str,
+    doctor_id: str,
+    db: Session,
+) -> None:
+    if x_role in ("staff", "admin") and telegram_user_id in settings.staff_ids:
+        require_permission(x_role, "calendar:read:doctor")
+        return
+    if x_role == "doctor":
+        doctor = db.get(Doctor, doctor_id)
+        if doctor and doctor.telegram_user_id == telegram_user_id:
+            require_permission(x_role, "calendar:read:doctor")
+            return
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _patient_chat_id(db: Session, patient_id: str) -> str | None:
+    patient = db.get(Patient, patient_id)
+    if not patient:
+        return None
+    user = db.scalar(select(User).where(User.telegram_user_id == patient.telegram_user_id))
+    return user.chat_id if user else None
 
 
 def _user_read(user: User) -> UserRead:

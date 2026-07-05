@@ -34,9 +34,12 @@
 
 ```bash
 cp .env.example .env
-# Заполните TELEGRAM_BOT_TOKEN, ADMIN_TOKEN
-docker compose up --build
+# Заполните TELEGRAM_BOT_TOKEN, ADMIN_TOKEN, INTERNAL_SERVICE_TOKEN
+docker compose up -d --build
+docker compose up -d docs   # MkDocs на :8008
 ```
+
+**Для ментора:** [Руководство для ментора](mentor-guide.md) — все URL и чеклист проверки.
 
 Подробнее: [Быстрый старт](getting-started.md).
 
@@ -44,6 +47,7 @@ docker compose up --build
 
 | Раздел | Для кого | Содержание |
 |--------|----------|------------|
+| [Для ментора](mentor-guide.md) | Ментор, ревьюер | URL, демо, smoke-тест за 15 мин |
 | [Админ-панель](admin.md) | Оператор, демо | UI на `:8190`, статистика, сброс |
 | [Демо-сценарий](demo.md) | Презентация, QA | 8 автоматических шагов |
 | [Специфика клиники](clinic-spec.md) | Заказчик, аналитик | Анкета под вашу стоматологию |
